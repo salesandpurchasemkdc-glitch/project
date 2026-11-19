@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Invoice Tracker</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<style>
+:root{--navy:#0f1b3d;--g:#15803d;--r:#dc2626;--o:#ea580c;--bg:#f6f8fb}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--navy)}
+.app{display:flex;min-height:100vh}nav{width:210px;background:var(--navy);color:#fff;padding:16px;flex-shrink:0}
+nav h3{margin:0 0 16px}nav a{display:block;padding:10px;border-radius:8px;color:#cbd5e1;cursor:pointer;margin-bottom:4px}
+nav a.on,nav a:hover{background:#ffffff1f;color:#fff}main{flex:1;padding:16px;min-width:0}
+.card{background:#fff;border-radius:14px;box-shadow:0 1px 4px #0001;padding:16px;margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+.grid .card{margin:0;border-top:4px solid var(--navy)}.big{font-size:24px;font-weight:600}
+input,select{padding:8px;border:1px solid #cbd5e1;border-radius:8px;font:inherit}
+button{background:var(--navy);color:#fff;border:0;border-radius:8px;padding:8px 12px;cursor:pointer;margin:2px;font:inherit}
+button.g{background:var(--g)}button.r{background:var(--r)}button.x{background:#64748b}
+.scroll{overflow-x:auto}table{width:100%;border-collapse:collapse;min-width:720px}
+th{text-align:left;padding:8px;cursor:pointer;white-space:nowrap}td{padding:8px;border-top:1px solid #e5e9f2}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.err{color:var(--r)}.link{color:#2563eb;cursor:pointer}
+.Received{color:var(--g)}.Pending{color:var(--o)}.NotReceived{color:var(--r)}.unread{background:#eff6ff}
+@media(max-width:720px){.app{flex-direction:column}nav{width:100%;display:flex;flex-wrap:wrap;gap:4px}nav h3{width:100%;margin:0}nav a{margin:0}}
+</style></head>
+<body><div id="root"></div>
+<script>
+// ====== CONFIG: paste your Supabase project values ======
+const SUPABASE_URL = 'https://YOUR-PROJECT.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-KEY';
+// ========================================================
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const S = {tab:'dash',rows:[],notes:[],profile:null,session:null,q:'',fs:'',vf:'',from:'',to:'',sort:'invoice_date',dir:-1,page:0,hist:null,err:'',busy:false};
+const PER = 10, $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const IST = d => new Date(d).toLocaleString('en-IN',{timeZone:'Asia/Kolkata',dateStyle:'medium',timeStyle:'short'});
+const INR = n => '₹' + Number(n).toLocaleString('en-IN',{minimumFractionDigits:2});
+const cls = s => s.replace(' ','');
+const isAdmin = () => S.profile && S.profile.role === 'admin';
+
+function filtered(){
+  const q = S.q.toLowerCase();
+  const r = S.rows.filter(x => (!S.fs||x.status===S.fs) && (!S.vf||x.vendor_name===S.vf) && (!S.from||x.invoice_date>=S.from) && (!S.to||x.invoice_date<=S.to)
+    && [x.vendor_name,x.invoice_number,x.party_name].join(' ').toLowerCase().includes(q));
+  const k = S.sort, d = S.dir;
+  return r.sort((a,b) => (k==='amount' ? a[k]-b[k] : String(a[k]).localeCompare(String(b[k]))) * d);
+}
+const sum = (a,s) => a.filter(x=>!s||x.status===s).reduce((t,x)=>t+Number(x.amount),0);
+const cnt = (a,s) => a.filter(x=>!s||x.status===s).length;
+
+async function load(){
+  const a = await sb.from('invoices').select('*').order('invoice_date',{ascending:false}).order('created_at',{ascending:false});
+  if (a.error) S.err = a.error.message; else S.rows = a.data;
+  const n = await sb.from('notifications').select('*').order('created_at',{ascending:false}).limit(50);
+  if (!n.error) S.notes = n.data;
+  render();
+}
+async function boot(){
+  const {data} = await sb.auth.getSession(); S.session = data.session;
+  sb.auth.onAuthStateChange((_e,s) => { S.session = s; if (!s) { S.profile = null; render(); } else start(); });
+  if (S.session) start(); else render();
+}
+let started = false;
+async function start(){
+  const p = await sb.from('profiles').select('*').eq('id',S.session.user.id).single(); S.profile = p.data;
+  await load();
+  if (started) return; started = true;
+  sb.channel('live').on('postgres_changes',{event:'*',schema:'public',table:'invoices'},load)
+    .on('postgres_changes',{event:'*',schema:'public',table:'notifications'},load).subscribe();
+}
+async function login(e){
+  e.preventDefault();
+  const {error} = await sb.auth.signInWithPassword({email:$('em').value,password:$('pw').value});
+  S.err = error ? error.message : ''; if (error) render();
+}
+async function addInvoice(e){
+  e.preventDefault(); S.err = '';
+  const f = k => $(k).value.trim(), amt = parseFloat(f('amount'));
+  if (!(amt > 0)) { S.err = 'Amount must be a positive number'; return render(); }
+  const {error} = await sb.from('invoices').insert({vendor_name:f('vendor_name'),invoice_date:f('invoice_date'),invoice_number:f('invoice_number'),party_name:f('party_name'),amount:amt,remarks:f('remarks')||null});
+  if (error) S.err = error.code==='23505' ? 'Duplicate: this vendor already has that invoice number' : error.message;
+  else { S.tab = 'inv'; S.err = ''; }
+  await load();
+}
+async function setStatus(id,st){
+  const remark = st==='Not Received' ? prompt('Remark (optional)') : null;
+  const {error} = await sb.rpc('set_invoice_status',{p_id:id,p_status:st,p_remark:remark});
+  if (error) { S.err = error.message; render(); } else load();
+}
+async function del(id){
+  const r = S.rows.find(x=>x.id===id);
+  if (!confirm(`Delete ${r.invoice_number} (${r.vendor_name})? Its history is kept.`)) return;
+  const {error} = await sb.from('invoices').delete().eq('id',id);
+  if (error) { S.err = error.message; render(); } else load();
+}
+async function showHist(id){
+  const r = S.rows.find(x=>x.id===id);
+  const {data} = await sb.from('invoice_history').select('*').eq('invoice_id',id).order('created_at');
+  S.hist = {r,data:data||[]}; render();
+}
+async function readAll(){ await sb.from('notifications').update({is_read:true}).eq('is_read',false); load(); }
+function setF(k,v){ S[k]=v; S.page=0; render(); }
+function sortBy(k){ S.dir = S.sort===k ? -S.dir : 1; S.sort = k; render(); }
+function go(t){ S.tab=t; S.err=''; S.hist=null; render(); }
+function dateDrill(d){ S.from=S.to=d; S.fs=''; S.tab='inv'; S.page=0; render(); }
+function preset(days){ // quick daily/weekly/monthly report ranges
+  const t = new Date(Date.now()+5.5*3600e3), f = new Date(t - (days-1)*864e5);
+  S.from = f.toISOString().slice(0,10); S.to = t.toISOString().slice(0,10); S.page=0; render();
+}
+function clearF(){ Object.assign(S,{q:'',fs:'',vf:'',from:'',to:'',page:0}); render(); }
+
+// ---- Exports (use current filters/date range) ----
+const HEAD = ['Vendor','Invoice Date','Invoice No.','Party','Amount','Status','Entered (IST)'];
+const exRows = () => filtered().map(x => [x.vendor_name,x.invoice_date,x.invoice_number,x.party_name,Number(x.amount),x.status,IST(x.created_at)]);
+const fname = ext => `invoices_${S.from||'all'}_${S.to||'all'}.${ext}`;
+function expCSV(){
+  const q = v => `"${String(v).replace(/"/g,'""')}"`;
+  const csv = [HEAD,...exRows()].map(r => r.map(q).join(',')).join('\n');
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['\ufeff'+csv],{type:'text/csv'})); a.download = fname('csv'); a.click();
+}
+function expXLSX(){ const ws = XLSX.utils.aoa_to_sheet([HEAD,...exRows()]), wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,'Invoices'); XLSX.writeFile(wb,fname('xlsx')); }
+function expPDF(){
+  const d = new jspdf.jsPDF({orientation:'landscape'});
+  d.text(`Invoices ${S.from||'all'} to ${S.to||'all'}${S.fs?' - '+S.fs:''}`,14,14);
+  d.autoTable({head:[HEAD],body:exRows().map(r=>[...r.slice(0,4),'Rs '+r[4].toFixed(2),...r.slice(5)]),startY:20,styles:{fontSize:8}});
+  d.save(fname('pdf'));
+}
+
+// ---- Views ----
+function dashView(){
+  const a = S.rows, by = {};
+  a.forEach(x => { (by[x.invoice_date] = by[x.invoice_date]||[]).push(x); });
+  const cards = [['Total Invoices',''],['Received','Received'],['Not Received','Not Received'],['Pending','Pending']];
+  return `<div class="grid">${cards.map(([t,s]) => `<div class="card" style="border-top-color:${s==='Received'?'var(--g)':s==='Not Received'?'var(--r)':s==='Pending'?'var(--o)':'var(--navy)'}"><b>${t}</b><div class="big">${cnt(a,s)}</div><div>${INR(sum(a,s))}</div></div>`).join('')}</div>
+  <div class="card"><b>Date-wise summary</b> <small>(click a date to open its invoices)</small><div class="scroll"><table><tr><th>Date</th><th>Invoices</th><th>Amount</th><th>Received</th><th>Not Received</th><th>Pending</th></tr>
+  ${Object.keys(by).sort().reverse().map(d => `<tr><td class="link" onclick="dateDrill('${d}')">${d}</td><td>${by[d].length}</td><td>${INR(sum(by[d]))}</td><td class="Received">${cnt(by[d],'Received')}</td><td class="NotReceived">${cnt(by[d],'Not Received')}</td><td class="Pending">${cnt(by[d],'Pending')}</td></tr>`).join('')}</table></div></div>`;
+}
+function invView(){
+  const f = filtered(), pages = Math.max(1,Math.ceil(f.length/PER)); if (S.page>=pages) S.page = pages-1;
+  const vendors = [...new Set(S.rows.map(x=>x.vendor_name))].sort();
+  const arrow = k => S.sort===k ? (S.dir>0?' ▲':' ▼') : '';
+  let last = '';
+  const body = f.slice(S.page*PER,(S.page+1)*PER).map(x => {
+    const hd = x.invoice_date!==last ? `<tr><td colspan="7" style="background:#eef2f9"><b>${x.invoice_date}</b></td></tr>` : ''; last = x.invoice_date;
+    return hd + `<tr><td>${esc(x.vendor_name)}</td><td>${x.invoice_date}</td><td>${esc(x.invoice_number)}</td><td>${esc(x.party_name)}</td><td>${INR(x.amount)}</td>
+    <td><b class="${cls(x.status)}">● ${x.status}</b></td><td><button class="g" onclick="setStatus('${x.id}','Received')">Received</button><button class="r" onclick="setStatus('${x.id}','Not Received')">Not Received</button><button class="x" onclick="showHist('${x.id}')">History</button>${isAdmin()?`<button class="x" onclick="del('${x.id}')">Delete</button>`:''}</td></tr>`;
+  }).join('');
+  return `<div class="card row">
+    <input placeholder="Search vendor / invoice / party" value="${esc(S.q)}" oninput="S.q=this.value;S.page=0;clearTimeout(window.t);window.t=setTimeout(render,300)" style="flex:1;min-width:180px">
+    <select onchange="setF('fs',this.value)"><option value="">All statuses</option>${['Pending','Received','Not Received'].map(s=>`<option ${S.fs===s?'selected':''}>${s}</option>`).join('')}</select>
+    <select onchange="setF('vf',this.value)"><option value="">All vendors</option>${vendors.map(v=>`<option ${S.vf===v?'selected':''} value="${esc(v)}">${esc(v)}</option>`).join('')}</select>
+    <input type="date" value="${S.from}" onchange="setF('from',this.value)"><input type="date" value="${S.to}" onchange="setF('to',this.value)">
+    <button class="x" onclick="preset(1)">Today</button><button class="x" onclick="preset(7)">7 days</button><button class="x" onclick="preset(30)">30 days</button><button class="x" onclick="clearF()">Clear</button></div>
+  <div class="card"><div class="row"><b>${f.length} invoices · Total ${INR(sum(f))}</b><span style="flex:1"></span>Export:
+    <button onclick="expXLSX()">Excel</button><button onclick="expPDF()">PDF</button><button onclick="expCSV()">CSV</button></div>
+  <div class="scroll"><table><tr><th onclick="sortBy('vendor_name')">Vendor${arrow('vendor_name')}</th><th onclick="sortBy('invoice_date')">Invoice Date${arrow('invoice_date')}</th><th onclick="sortBy('invoice_number')">Invoice No.${arrow('invoice_number')}</th><th>Party</th><th onclick="sortBy('amount')">Amount${arrow('amount')}</th><th>Status</th><th>Action</th></tr>${body}</table></div>
+  ${f.length?'':'<p>No invoices found.</p>'}
+  <div class="row"><button class="x" ${S.page?'':'disabled'} onclick="S.page--;render()">Prev</button>Page ${S.page+1} of ${pages}<button class="x" ${S.page<pages-1?'':'disabled'} onclick="S.page++;render()">Next</button></div></div>
+  ${S.hist?`<div class="card"><b>History: ${esc(S.hist.r.invoice_number)} (${esc(S.hist.r.vendor_name)})</b><button class="x" onclick="S.hist=null;render()">Close</button><ul>${S.hist.data.map(h=>`<li>${IST(h.created_at)} – ${h.action==='status_changed'?'Marked '+h.status:h.action} by ${esc(h.actor_name)}${h.remark?' (“'+esc(h.remark)+'”)':''}</li>`).join('')}</ul></div>`:''}`;
+}
+function addView(){
+  const i = (id,p,t='text',r=true) => `<input id="${id}" type="${t}" placeholder="${p}" title="${p}" ${r?'required':''} step="0.01">`;
+  return `<form class="card grid" onsubmit="addInvoice(event)" style="display:grid">${i('vendor_name','Vendor Name')}${i('invoice_date','Invoice Date','date')}${i('invoice_number','Invoice Number')}${i('party_name','Party Name')}${i('amount','Amount ₹','number')}${i('remarks','Remarks (optional)','text',false)}<button>Add Invoice</button></form>`;
+}
+function notesView(){
+  return `<div class="card"><button onclick="readAll()">Mark all read</button>${S.notes.map(n=>`<p class="${n.is_read?'':'unread'}">${IST(n.created_at)} – ${esc(n.message)}</p>`).join('')||'<p>No notifications.</p>'}</div>`;
+}
+function render(){
+  const root = $('root');
+  if (!S.session) { root.innerHTML = `<form class="card" onsubmit="login(event)" style="max-width:340px;margin:80px auto"><h2>Invoice Tracker</h2><input id="em" type="email" placeholder="Email" required style="width:100%;margin-bottom:8px"><input id="pw" type="password" placeholder="Password" required style="width:100%;margin-bottom:8px"><button style="width:100%">Log in</button><p class="err">${esc(S.err)}</p></form>`; return; }
+  if (SUPABASE_URL.includes('YOUR-PROJECT')) S.err = 'Set SUPABASE_URL and SUPABASE_ANON_KEY at the top of index.html';
+  const unread = S.notes.filter(n=>!n.is_read).length;
+  const tabs = [['dash','Dashboard'],['inv','All Invoices / Reports'],...(isAdmin()?[['add','Add Invoice']]:[]),['notes',`Notifications (${unread})`]];
+  const focus = document.activeElement && document.activeElement.placeholder && document.activeElement.placeholder.startsWith('Search');
+  root.innerHTML = `<div class="app"><nav><h3>Invoice Tracker</h3>${tabs.map(([k,l])=>`<a class="${S.tab===k?'on':''}" onclick="go('${k}')">${l}</a>`).join('')}<a onclick="sb.auth.signOut()">Logout (${S.profile?S.profile.role:''})</a></nav>
+  <main>${S.err?`<p class="err">${esc(S.err)}</p>`:''}${{dash:dashView,inv:invView,add:addView,notes:notesView}[S.tab]()}</main></div>`;
+  if (focus) { const el = root.querySelector('input[placeholder^="Search"]'); if (el) { el.focus(); el.setSelectionRange(el.value.length,el.value.length); } }
+}
+boot();
+</script></body></html>
